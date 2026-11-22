@@ -1,277 +1,284 @@
 #!/usr/bin/env python3
-"""One Orange -- the picture that tastes of one ingredient.
+"""One Orange — a single halved orange that fills the frame.
 
-A single halved orange fills the frame, drawn entirely procedurally
-with Pillow: no files, no network, no wall clock. Every random draw
-comes from a fixed seed, so two runs produce a byte-identical PNG.
-
-Layout (1024x1024 output, rendered at 2x and downscaled):
-  * warm cream-to-honey sky above a wooden table
-  * a whole orange with dimpled peel behind, left
-  * one big halved orange, centre-right, ten juicy segments,
-    pale pith ring, droplets and a soft sheen
-  * a cut wedge leaning in front, bottom right
-  * green leaves sprouting from the top of the fruit
-  * an arc of juice beads bursting from the cut face
-
-Run:  python3 main.py
-Out:  /output/entry.png  (or $MAKEFUN_OUTPUT_DIR/entry.png)
+Procedural picture, drawn from scratch with Pillow only.
+Fully deterministic: fixed seed, no clock, no network, no files read.
+Writes one image: $MAKEFUN_OUTPUT_DIR/entry.png (or /output/entry.png,
+or ./output/entry.png when neither exists).
 """
+
 import math
 import os
 import random
+import sys
 
 from PIL import Image, ImageDraw, ImageFilter
 
-SS = 2                       # supersample factor
-W = 1024 * SS                # working canvas (square)
-HALF_CX, HALF_CY = 545 * SS, 552 * SS
-HALF_R = 338 * SS            # halved orange radius
+SEED = 20261122
+SS = 2048          # supersample size; downscaled to 1024 at the end
+OUT = 1024
 
-# ---- palette: one ingredient, warm and juicy ---------------------
-SKY_TOP = (255, 246, 220)
-SKY_MID = (252, 214, 148)
-WOOD = (150, 88, 46)
-WOOD_DARK = (120, 64, 30)
-PEEL = (240, 138, 16)
-PEEL_DEEP = (210, 102, 6)
-PEEL_PORE = (222, 112, 10)
-PITH = (255, 228, 172)
-FLESH_A = (255, 168, 34)
-FLESH_B = (255, 126, 6)
-VESICLE = (255, 216, 112)
-LEAF = (52, 142, 56)
-LEAF_SHADE = (30, 98, 40)
-
-
-def mix(c1, c2, t):
-    return tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3))
-
-
-def make_background():
-    """Cream sky melting into honey, then a wooden table band."""
-    grad = Image.new("RGB", (1, W))
-    px = grad.load()
-    horizon = int(W * 0.66)
-    for y in range(W):
-        if y < horizon:
-            px[0, y] = mix(SKY_TOP, SKY_MID, y / horizon)
-        else:
-            t = (y - horizon) / (W - horizon)
-            px[0, y] = mix(WOOD, WOOD_DARK, t)
-    img = grad.resize((W, W))
-    d = ImageDraw.Draw(img)
-    # faint plank seams on the table
-    for yy in (0.74, 0.84, 0.94):
-        y = int(W * yy)
-        d.line([(0, y), (W, y)], fill=(96, 50, 22), width=2 * SS)
-    return img
+# --- palette ---------------------------------------------------------------
+WALL_TOP = (255, 243, 210)
+WALL_BOT = (252, 228, 178)
+TABLE_TOP = (183, 112, 48)
+TABLE_BOT = (122, 70, 26)
+PLANK = (96, 54, 18)
+RIND = (206, 102, 8)
+RIND_DARK = (178, 84, 4)
+PITH = (255, 233, 182)
+FLESH_A = (255, 172, 44)
+FLESH_B = (255, 146, 18)
+JUICE = (255, 216, 122)
+JUICE_HI = (255, 242, 196)
+LEAF_A = (52, 130, 52)
+LEAF_B = (30, 96, 42)
+WHOLE = (244, 138, 20)
+PORE = (206, 96, 4)
+SHADOW = (60, 30, 8)
 
 
-def soft_shadow(img):
-    layer = Image.new("RGBA", (W, W), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    d.ellipse([110 * SS, 836 * SS, 940 * SS, 946 * SS],
-              fill=(58, 24, 4, 118))
-    layer = layer.filter(ImageFilter.GaussianBlur(16 * SS))
-    return Image.alpha_composite(img.convert("RGBA"), layer)
+def lerp(a, b, t):
+    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
 
 
-def draw_leaf(d, x, y, length, angle_deg, fill):
-    """Curved leaf, stem anchored exactly at (x, y)."""
-    a = math.radians(angle_deg)
-    tip = (x + length * math.cos(a), y + length * math.sin(a))
-    perp = math.radians(angle_deg + 90)
-    width = length * 0.24
+def leaf_points(cx, cy, length, width, tilt):
+    """A pointed leaf shape as a polygon, built from two arcs."""
     pts = []
-    for i in range(21):
-        t = i / 20
-        bulge = math.sin(t * math.pi) * width
-        pts.append((x + (tip[0] - x) * t + bulge * math.cos(perp),
-                    y + (tip[1] - y) * t + bulge * math.sin(perp)))
-    for i in range(20, -1, -1):
-        t = i / 20
-        bulge = math.sin(t * math.pi) * width
-        pts.append((x + (tip[0] - x) * t - bulge * math.cos(perp),
-                    y + (tip[1] - y) * t - bulge * math.sin(perp)))
-    d.polygon(pts, fill=fill)
-    d.line([(x, y), tip], fill=LEAF_SHADE, width=3 * SS)
-
-
-def whole_orange(img):
-    d = ImageDraw.Draw(img, "RGBA")
-    cx, cy, r = 208 * SS, 648 * SS, 148 * SS
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=PEEL + (255,))
-    # dimpled peel pores
-    rng = random.Random(20261122)
-    for _ in range(240):
-        a = rng.uniform(0, 2 * math.pi)
-        rr = r * math.sqrt(rng.uniform(0, 0.9))
-        x, y = cx + rr * math.cos(a), cy + rr * math.sin(a)
-        d.ellipse([x - 3 * SS, y - 2 * SS, x + 3 * SS, y + 2 * SS],
-                  fill=PEEL_PORE + (88,))
-    # small highlight on the peel, kept subtle so it never reads as a hole
-    d.ellipse([cx - int(r * 0.42), cy - int(r * 0.55),
-               cx - int(r * 0.08), cy - int(r * 0.28)],
-              fill=(255, 232, 170, 52))
-    return img
-
-
-def halved_orange(img):
-    d = ImageDraw.Draw(img, "RGBA")
-    cx, cy, r = HALF_CX, HALF_CY, HALF_R
-    # rind -> pith -> flesh rings
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=PEEL_DEEP)
-    r_pith = int(r * 0.95)
-    d.ellipse([cx - r_pith, cy - r_pith, cx + r_pith, cy + r_pith],
-              fill=PITH)
-    r_flesh = int(r * 0.885)
-    d.ellipse([cx - r_flesh, cy - r_flesh, cx + r_flesh, cy + r_flesh],
-              fill=FLESH_B)
-    # ten segments, pale membranes between them
-    n = 10
-    for i in range(n):
-        a0 = (i / n) * 360.0 + 5.0
-        a1 = ((i + 1) / n) * 360.0 - 5.0
-        col = FLESH_A if i % 2 == 0 else (255, 150, 22)
-        d.pieslice([cx - r_flesh, cy - r_flesh, cx + r_flesh, cy + r_flesh],
-                   a0, a1, fill=col)
-        # juice vesicles: short radial strokes inside the segment
-        rng = random.Random(500 + i)
-        for _ in range(44):
-            am = math.radians(rng.uniform(a0 + 2, a1 - 2))
-            rr0 = rng.uniform(0.20, 0.78) * r_flesh
-            rr1 = rr0 + rng.uniform(0.06, 0.14) * r_flesh
-            d.line([cx + rr0 * math.cos(am), cy + rr0 * math.sin(am),
-                    cx + rr1 * math.cos(am), cy + rr1 * math.sin(am)],
-                   fill=VESICLE + (150,), width=int(3 * SS))
-    # membrane spokes
-    for i in range(n):
-        a = math.radians(i * 36.0)
-        d.line([cx, cy, cx + r_flesh * math.cos(a),
-                cy + r_flesh * math.sin(a)],
-               fill=PITH + (210,), width=int(2.5 * SS))
-    # pale core star
-    d.ellipse([cx - 15 * SS, cy - 15 * SS, cx + 15 * SS, cy + 15 * SS],
-              fill=PITH)
-    # soft sheen, upper left of the cut face
-    sheen = Image.new("RGBA", (W, W), (0, 0, 0, 0))
-    sd = ImageDraw.Draw(sheen)
-    sd.ellipse([cx - int(r * 0.62), cy - int(r * 0.74),
-                cx - int(r * 0.14), cy - int(r * 0.32)],
-               fill=(255, 255, 255, 60))
-    sheen = sheen.filter(ImageFilter.GaussianBlur(14 * SS))
-    return Image.alpha_composite(img, sheen)
-
-
-def wedge(img):
-    """One cut wedge leaning in front, bottom right."""
-    d = ImageDraw.Draw(img, "RGBA")
-    cx, cy, r = 806 * SS, 798 * SS, 134 * SS
-    d.pieslice([cx - r, cy - r, cx + r, cy + r], 170, 290,
-               fill=PEEL_DEEP)
-    r2 = int(r * 0.90)
-    d.pieslice([cx - r2, cy - r2, cx + r2, cy + r2], 174, 286,
-               fill=PITH)
-    r3 = int(r * 0.82)
-    d.pieslice([cx - r3, cy - r3, cx + r3, cy + r3], 178, 282,
-               fill=FLESH_A)
-    rng = random.Random(77)
-    for _ in range(24):
-        am = math.radians(rng.uniform(184, 276))
-        rr0 = rng.uniform(0.16, 0.60) * r3
-        rr1 = rr0 + rng.uniform(0.08, 0.16) * r3
-        d.line([cx + rr0 * math.cos(am), cy + rr0 * math.sin(am),
-                cx + rr1 * math.cos(am), cy + rr1 * math.sin(am)],
-               fill=VESICLE + (170,), width=int(3 * SS))
-    return img
-
-
-def droplets(img):
-    d = ImageDraw.Draw(img, "RGBA")
-    rng = random.Random(4242)
-    for _ in range(64):
-        a = rng.uniform(0, 2 * math.pi)
-        rr = rng.uniform(0.28, 0.86) * HALF_R
-        x = HALF_CX + rr * math.cos(a)
-        y = HALF_CY + rr * math.sin(a)
-        s = rng.uniform(4, 10) * SS
-        d.ellipse([x - s, y - s * 0.8, x + s, y + s * 0.8],
-                  fill=(255, 238, 184, 165))
-        d.ellipse([x - s * 0.4, y - s * 0.5, x + s * 0.1, y - s * 0.05],
-                  fill=(255, 255, 255, 210))
-    return img
-
-
-def juice_beads(img):
-    """Bright juice beads arcing off the cut face, top right."""
-    d = ImageDraw.Draw(img, "RGBA")
-    rng = random.Random(9182)
-    for i in range(30):
-        t = i / 29
-        x = HALF_CX + HALF_R * 0.72 + 132 * SS * t + rng.uniform(-8, 8) * SS
-        y = (HALF_CY - HALF_R * 0.34 - 96 * SS * math.sin(t * math.pi)
-             + rng.uniform(-7, 7) * SS)
-        s = rng.uniform(3.5, 8.5) * SS
-        d.ellipse([x - s, y - s, x + s, y + s],
-                  fill=(255, 176, 44, 220))
-        d.ellipse([x - s * 0.45, y - s * 0.55, x, y - s * 0.1],
-                  fill=(255, 255, 255, 220))
-    # a second, lower trail of finer beads falling back toward the table
-    for i in range(12):
-        t = i / 11
-        x = HALF_CX + HALF_R * 0.86 + 96 * SS * t + rng.uniform(-6, 6) * SS
-        y = (HALF_CY - HALF_R * 0.10 + 64 * SS * t
-             + rng.uniform(-5, 5) * SS)
-        s = rng.uniform(2.5, 5.5) * SS
-        d.ellipse([x - s, y - s, x + s, y + s],
-                  fill=(255, 186, 60, 200))
-        d.ellipse([x - s * 0.4, y - s * 0.5, x, y - s * 0.1],
-                  fill=(255, 255, 255, 200))
-    return img
-
-
-def warm_vignette(img):
-    mask = Image.new("L", (W, W), 0)
-    md = ImageDraw.Draw(mask)
-    md.ellipse([-int(W * 0.20), -int(W * 0.24),
-                int(W * 1.20), int(W * 1.16)], fill=255)
-    mask = mask.filter(ImageFilter.GaussianBlur(80 * SS))
-    dark = Image.new("RGBA", (W, W), (90, 36, 4, 255))
-    shaded = Image.blend(img, dark, 0.40)
-    return Image.composite(img, shaded, mask)
+    steps = 24
+    for i in range(steps + 1):
+        t = i / steps
+        # spine runs from base (0,0) to tip (0,-length), bulging sideways
+        y = -length * t
+        w = width * math.sin(math.pi * (t ** 0.8)) * 0.5
+        x = w
+        xr = x * math.cos(tilt) - y * math.sin(tilt)
+        yr = x * math.sin(tilt) + y * math.cos(tilt)
+        pts.append((cx + xr, cy + yr))
+    for i in range(steps, -1, -1):
+        t = i / steps
+        y = -length * t
+        w = width * math.sin(math.pi * (t ** 0.8)) * 0.5
+        x = -w
+        xr = x * math.cos(tilt) - y * math.sin(tilt)
+        yr = x * math.sin(tilt) + y * math.cos(tilt)
+        pts.append((cx + xr, cy + yr))
+    return pts
 
 
 def main():
-    img = make_background()
-    img = soft_shadow(img)
-    img = whole_orange(img)
-    d = ImageDraw.Draw(img, "RGBA")
-    draw_leaf(d, 252 * SS, 512 * SS, 146 * SS, -40, LEAF)
-    draw_leaf(d, 302 * SS, 528 * SS, 118 * SS, -10, LEAF_SHADE)
-    img = halved_orange(img)
-    d = ImageDraw.Draw(img, "RGBA")
-    draw_leaf(d, HALF_CX - 6 * SS, HALF_CY - HALF_R + 12 * SS,
-              126 * SS, -118, LEAF_SHADE)
-    draw_leaf(d, HALF_CX + 8 * SS, HALF_CY - HALF_R + 8 * SS,
-              146 * SS, -58, LEAF)
-    img = wedge(img)
-    img = droplets(img)
-    img = juice_beads(img)
-    img = warm_vignette(img)
-    img = img.convert("RGB").resize((1024, 1024), Image.LANCZOS)
+    rng = random.Random(SEED)
+    img = Image.new("RGB", (SS, SS))
+    d = ImageDraw.Draw(img)
 
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(out_dir, "entry.png")
-    except PermissionError:
-        out_dir = "output"
-        os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(out_dir, "entry.png")
-    img.save(out_path, optimize=True)
-    print("wrote", out_path)
+    # --- wall: warm cream vertical gradient -------------------------------
+    for y in range(SS):
+        t = y / SS
+        d.line([(0, y), (SS, y)], fill=lerp(WALL_TOP, WALL_BOT, t))
+
+    table_y = int(SS * 0.68)
+
+    # --- table: warm wood, planks -----------------------------------------
+    for y in range(table_y, SS):
+        t = (y - table_y) / (SS - table_y)
+        d.line([(0, y), (SS, y)], fill=lerp(TABLE_TOP, TABLE_BOT, t))
+    for py in (0.74, 0.83, 0.92):
+        y = int(SS * py)
+        d.line([(0, y), (SS, y)], fill=PLANK, width=5)
+        d.line([(0, y + 5), (SS, y + 5)], fill=lerp(TABLE_TOP, TABLE_BOT, 0.4), width=2)
+
+    # soft contact shadow under the fruit
+    shadow = Image.new("RGBA", (SS, SS), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shadow)
+    sd.ellipse([SS * 0.08, SS * 0.82, SS * 0.94, SS * 0.99], fill=SHADOW + (90,))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(38))
+    img.paste(Image.alpha_composite(img.convert("RGBA"), shadow).convert("RGB"), (0, 0))
+    d = ImageDraw.Draw(img)
+
+    cx, cy = SS // 2, int(SS * 0.475)
+    R = int(SS * 0.365)
+
+    # --- whole orange behind, left ----------------------------------------
+    wx, wy, wr = int(SS * 0.17), int(SS * 0.70), int(SS * 0.155)
+    d.ellipse([wx - wr, wy - wr, wx + wr, wy + wr], fill=WHOLE)
+    d.ellipse([wx - wr, wy - wr, wx + wr, wy + wr], outline=RIND_DARK, width=6)
+    # pores
+    for _ in range(260):
+        a = rng.uniform(0, 2 * math.pi)
+        r = wr * math.sqrt(rng.uniform(0, 0.94))
+        px, py = wx + r * math.cos(a), wy + r * math.sin(a)
+        rad = rng.uniform(2, 6)
+        d.ellipse([px - rad, py - rad, px + rad, py + rad], fill=PORE)
+    # glossy highlight on the whole orange: soft, blurred, off-centre
+    hi = Image.new("RGBA", (SS, SS), (0, 0, 0, 0))
+    hd = ImageDraw.Draw(hi)
+    hd.ellipse([wx - wr * 0.55, wy - wr * 0.66, wx - wr * 0.18, wy - wr * 0.40],
+               fill=(255, 220, 160, 130))
+    hi = hi.filter(ImageFilter.GaussianBlur(16))
+    img = Image.alpha_composite(img.convert("RGBA"), hi).convert("RGB")
+    d = ImageDraw.Draw(img)
+    # little stem scar
+    d.ellipse([wx - 26, wy - wr - 4, wx + 26, wy - wr + 30], fill=(250, 226, 170))
+
+    # --- leaves above the halved orange ------------------------------------
+    stem_x, stem_y = cx, cy - R - 8
+    d.polygon(leaf_points(cx - 62, stem_y + 30, 300, 190, -0.62), fill=LEAF_B)
+    d.polygon(leaf_points(cx + 66, stem_y + 30, 330, 200, 0.58), fill=LEAF_A)
+    # leaf veins
+    for (lx, tilt, ln) in ((cx - 62, -0.62, 300), (cx + 66, 0.58, 330)):
+        x0, y0 = lx, stem_y + 30
+        x1 = x0 + math.sin(tilt) * ln * 0.92
+        y1 = y0 - math.cos(tilt) * ln * 0.92
+        d.line([(x0, y0), (x1, y1)], fill=(20, 70, 30), width=7)
+    # stem
+    d.line([(cx, stem_y + 40), (cx, stem_y - 6)], fill=(120, 70, 20), width=14)
+
+    # --- halved orange: rind, pith, flesh ----------------------------------
+    d.ellipse([cx - R, cy - R, cx + R, cy + R], fill=RIND)
+    d.ellipse([cx - R, cy - R, cx + R, cy + R], outline=RIND_DARK, width=8)
+    pr = int(R * 0.94)
+    d.ellipse([cx - pr, cy - pr, cx + pr, cy + pr], fill=PITH)
+    fr = int(R * 0.86)
+    d.ellipse([cx - fr, cy - fr, cx + fr, cy + fr], fill=FLESH_A)
+
+    # segments: alternate flesh tones, split by pale pith spokes
+    n_seg = 10
+    for i in range(n_seg):
+        a0 = 2 * math.pi * i / n_seg - math.pi / 2
+        a1 = 2 * math.pi * (i + 1) / n_seg - math.pi / 2
+        mid = (a0 + a1) / 2
+        if i % 2 == 0:
+            d.pieslice([cx - fr, cy - fr, cx + fr, cy + fr],
+                       math.degrees(a0), math.degrees(a1), fill=FLESH_B)
+        # pith spoke: thin wedge from centre to rim
+        w = 0.018
+        d.polygon([
+            (cx + math.cos(a0 - w) * 26, cy + math.sin(a0 - w) * 26),
+            (cx + math.cos(a0 - w) * fr, cy + math.sin(a0 - w) * fr),
+            (cx + math.cos(a0 + w) * fr, cy + math.sin(a0 + w) * fr),
+            (cx + math.cos(a0 + w) * 26, cy + math.sin(a0 + w) * 26),
+        ], fill=PITH)
+
+    # juice cells: dense radial streaks inside every segment
+    glow = Image.new("RGBA", (SS, SS), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    for i in range(n_seg):
+        a0 = 2 * math.pi * i / n_seg - math.pi / 2 + 0.06
+        a1 = 2 * math.pi * (i + 1) / n_seg - math.pi / 2 - 0.06
+        for _ in range(150):
+            a = rng.uniform(a0, a1)
+            r0 = rng.uniform(fr * 0.18, fr * 0.82)
+            ln = rng.uniform(fr * 0.05, fr * 0.16)
+            x0, y0 = cx + r0 * math.cos(a), cy + r0 * math.sin(a)
+            x1, y1 = cx + (r0 + ln) * math.cos(a), cy + (r0 + ln) * math.sin(a)
+            col = JUICE_HI if rng.random() < 0.35 else JUICE
+            gd.line([(x0, y0), (x1, y1)], fill=col + (rng.randint(120, 210),),
+                    width=rng.randint(3, 7))
+    # water droplets on the cut face
+    for _ in range(46):
+        a = rng.uniform(0, 2 * math.pi)
+        r = fr * math.sqrt(rng.uniform(0.05, 0.85))
+        px, py = cx + r * math.cos(a), cy + r * math.sin(a)
+        rad = rng.uniform(7, 22)
+        gd.ellipse([px - rad, py - rad, px + rad, py + rad],
+                   fill=(255, 250, 225, 165))
+        gd.ellipse([px - rad * 0.45, py - rad * 0.5, px - rad * 0.05, py - rad * 0.1],
+                   fill=(255, 255, 255, 215))
+    img = Image.alpha_composite(img.convert("RGBA"), glow).convert("RGB")
+    d = ImageDraw.Draw(img)
+
+    # centre star of the cut face
+    d.ellipse([cx - 34, cy - 34, cx + 34, cy + 34], fill=PITH)
+    d.ellipse([cx - 14, cy - 14, cx + 14, cy + 14], fill=(255, 246, 214))
+
+    # glossy sheen across the upper-left of the flesh
+    sheen = Image.new("RGBA", (SS, SS), (0, 0, 0, 0))
+    shd = ImageDraw.Draw(sheen)
+    shd.ellipse([cx - fr * 0.95, cy - fr * 1.05, cx + fr * 0.15, cy - fr * 0.05],
+                fill=(255, 255, 255, 46))
+    sheen = sheen.filter(ImageFilter.GaussianBlur(30))
+    img = Image.alpha_composite(img.convert("RGBA"), sheen).convert("RGB")
+    d = ImageDraw.Draw(img)
+
+    # --- juice beads bursting from the right rim ---------------------------
+    bead = Image.new("RGBA", (SS, SS), (0, 0, 0, 0))
+    bd = ImageDraw.Draw(bead)
+    bx0, by0 = cx + R * 0.99, cy - R * 0.18
+    # burst cluster right at the rim where the juice leaves the fruit
+    for _ in range(10):
+        a = rng.uniform(-1.3, 0.5)
+        dist = rng.uniform(4, 42)
+        px = bx0 + math.cos(a) * dist
+        py = by0 + math.sin(a) * dist
+        rad = rng.uniform(7, 15)
+        bd.ellipse([px - rad, py - rad, px + rad, py + rad],
+                   fill=(255, 176, 40, 235))
+        bd.ellipse([px - rad * 0.4, py - rad * 0.45, px, py - rad * 0.05],
+                   fill=(255, 240, 190, 235))
+    for k in range(44):
+        t = k / 43
+        # short arc that rises a little, then falls back down under gravity
+        ang = -1.05 + t * 0.85
+        dist = 30 + t * 175 + rng.uniform(-8, 8)
+        px = bx0 + math.cos(ang) * dist
+        py = by0 + math.sin(ang) * dist * 0.8 + t * t * 120
+        rad = max(2.5, 11 - t * 8 + rng.uniform(-1.5, 1.5))
+        bd.ellipse([px - rad, py - rad, px + rad, py + rad],
+                   fill=(255, 176, 40, 235))
+        bd.ellipse([px - rad * 0.4, py - rad * 0.45, px, py - rad * 0.05],
+                   fill=(255, 240, 190, 235))
+    img = Image.alpha_composite(img.convert("RGBA"), bead).convert("RGB")
+    d = ImageDraw.Draw(img)
+
+    # --- wedge leaning on the front-right ----------------------------------
+    # drawn upright on its own layer, then tilted so it leans on the big orange
+    wl = Image.new("RGBA", (SS, SS), (0, 0, 0, 0))
+    wd = ImageDraw.Draw(wl)
+    wx2, wy2 = int(SS * 0.815), int(SS * 0.845)
+    wr2 = int(SS * 0.115)
+    wd.pieslice([wx2 - wr2, wy2 - wr2, wx2 + wr2, wy2 + wr2], 180, 360, fill=RIND + (255,))
+    wd.pieslice([wx2 - wr2 * 0.9, wy2 - wr2 * 0.9, wx2 + wr2 * 0.9, wy2 + wr2 * 0.9],
+                180, 360, fill=PITH + (255,))
+    wd.pieslice([wx2 - wr2 * 0.8, wy2 - wr2 * 0.8, wx2 + wr2 * 0.8, wy2 + wr2 * 0.8],
+                180, 360, fill=FLESH_A + (255,))
+    # spokes inside the wedge, fanning from its flat base
+    for s in range(5):
+        a = math.radians(180 + 36 * s + 18)
+        x1 = wx2 + math.cos(a) * wr2 * 0.78
+        y1 = wy2 + math.sin(a) * wr2 * 0.78
+        wd.line([(wx2, wy2), (x1, y1)], fill=PITH + (255,), width=7)
+    for _ in range(26):
+        a = math.radians(rng.uniform(185, 355))
+        r = rng.uniform(wr2 * 0.2, wr2 * 0.7)
+        px, py = wx2 + r * math.cos(a), wy2 + r * math.sin(a)
+        wd.line([(px, py), (px + 24, py + 6)], fill=JUICE + (255,), width=4)
+    wl = wl.rotate(24, resample=Image.BICUBIC, center=(wx2, wy2))
+    img = Image.alpha_composite(img.convert("RGBA"), wl).convert("RGB")
+    d = ImageDraw.Draw(img)
+
+    # --- warm vignette -------------------------------------------------------
+    vig = Image.new("L", (SS, SS), 0)
+    vd = ImageDraw.Draw(vig)
+    vd.ellipse([-SS * 0.12, -SS * 0.12, SS * 1.12, SS * 1.12], fill=255)
+    vig = vig.filter(ImageFilter.GaussianBlur(120))
+    dark = Image.new("RGBA", (SS, SS), (70, 35, 5, 255))
+    inv = vig.point(lambda v: 255 - v)
+    overlay = Image.new("RGBA", (SS, SS), (0, 0, 0, 0))
+    overlay.putalpha(inv.point(lambda v: int(v * 0.20)))
+    overlay.paste(dark, (0, 0), overlay)
+    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+    # --- downscale, save ----------------------------------------------------
+    img = img.resize((OUT, OUT), Image.LANCZOS)
+
+    outdir = os.environ.get("MAKEFUN_OUTPUT_DIR")
+    if not outdir:
+        outdir = "/output" if os.path.isdir("/output") else "output"
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, "entry.png")
+    img.save(path, format="PNG", optimize=True)
+    print("wrote", path, img.size, os.path.getsize(path), "bytes")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
